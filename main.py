@@ -1,5 +1,5 @@
 import sys
-# import faulthandler
+import faulthandler
 from PyQt5.QtWidgets import QApplication
 
 from CellAnalysis.CellAnalysis import InvadopodiaGui
@@ -32,9 +32,11 @@ if __name__ == '__main__':
             self.setApplicationName(APP_NAME)
             self.setApplicationVersion(APP_VERSION)
 
-    app = TestApp(sys.argv)
+    with open('traceback_dump.txt', 'w+') as dump_file:
+        faulthandler.enable(file=dump_file)
+        app = TestApp(sys.argv)
 
-    gui = InvadopodiaGui()
-    gui.show()
+        gui = InvadopodiaGui()
+        gui.show()
 
-    sys.exit(app.exec_())
+        sys.exit(app.exec_())
