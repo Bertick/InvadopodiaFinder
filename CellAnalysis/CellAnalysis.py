@@ -64,7 +64,7 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
         self.combobox_viewoptions.currentTextChanged.connect(self._update_imageview)
         # thresholds
         self.bttn_compute_otsu.pressed.connect(self._compute_threshold)
-        self.slider_threshold.sliderReleased.connect(self._update_images)
+        self.box_threshold.valueChanged.connect(self._update_images)
         # mouseClicked event from ImageView scene
         self.imageView.scene.sigMouseClicked.connect(self._on_mouse_click)
         # Marker buttons toggle
@@ -73,6 +73,9 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
         self.bttn_ignoremarker.toggled.connect(self._on_markerbuttons_click)
         # write report
         self.bttn_dosave.released.connect(self._write_report)
+        # ROI buttons toggle
+        self.bttn_roi_topleft.toggled.connect(self._on_roibuttons_click)
+        self.bttn_roi_bottomright.toggled.connect(self._on_roibuttons_click)
 
         # logging
         logging.info(f'Created InvadopodiaGui - {id(self)}')
@@ -85,7 +88,7 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
         fname, _ = QFileDialog.getOpenFileName(
             None,
             'Open file',
-            os.path.realpath('.'),
+            os.path.expanduser('~'),
             options=QFileDialog.DontUseNativeDialog
         )
         if not len(fname):
@@ -100,9 +103,13 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
             print(e)
         else:
             self.data['image'] = image
+            self.data['roi'] = (slice(0, image.shape[0]-1), slice(0, image.shape[1]-1))
+            # set roi values to GUI
+            self.box_roi_10.setValue(image.shape[0])
+            self.box_roi_11.setValue(image.shape[1])
             self.data['image_overlay'] = np.zeros_like(image)
             self.data['image_markers'] = np.zeros_like(image)
-            self.data['watershed'] = np.zeros_like(image)
+            self.data['image_watershed'] = np.zeros_like(image)
             self.data['new_marker'] = ()
             self.data['id_act_map'] = {}
             self._compute_threshold()
@@ -115,7 +122,9 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
         except KeyError:
             return
         threshold = threshold_otsu(image)
-        self.slider_threshold.setValue(threshold)
+        self.box_threshold.blockSignals(True)
+        self.box_threshold.setValue(threshold)
+        self.box_threshold.blockSignals(False)
         self._update_images()
 
     def _on_mouse_click(self, event):
@@ -125,6 +134,16 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
         # check that it's the left mouse button
         if event.buttons() != Qt.LeftButton:
             return
+        # get event location in image coordinates
+        pos = self.imageView.view.mapSceneToView(event.pos())
+        pos = (int(pos.x()), int(pos.y()))
+        print('event position: ', pos)
+        # first check if the user is trying to adjust the ROI
+        if self.bttn_roi_topleft.isChecked() or self.bttn_roi_bottomright.isChecked():
+            self._update_roi(pos)
+            event.accept()
+            return
+
         if self.bttn_addmarker.isChecked():
             action = 'add'
         elif self.bttn_removemarker.isChecked():
@@ -133,9 +152,6 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
             action = 'ignore'
         else:
             return
-        # get relative location
-        pos = self.imageView.view.mapSceneToView(event.pos())
-        pos = (int(pos.x()), int(pos.y()))
         self.data['new_marker'] = (pos, action)
         event.accept()
         self._process_new_marker()
@@ -155,6 +171,52 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
             self.bttn_addmarker.setChecked(False)
             self.bttn_removemarker.setChecked(False)
 
+    @pyqtSlot(bool)
+    def _on_roibuttons_click(self, checked):
+        if not checked:
+            return
+        sender = self.sender()
+        if sender is self.bttn_roi_topleft:
+            self.bttn_roi_bottomright.setChecked(False)
+        else:
+            self.bttn_roi_topleft.setChecked(False)
+
+    def _write_report(self):
+        try:
+            image = self.data['image']
+            image_watershed = self.data['image_watershed']
+            index_to_action = self.data['id_act_map']
+        except KeyError:
+            return
+        # get where user wants to save files
+        fname, _ = QFileDialog.getSaveFileName(
+            self,
+            'Save Report',
+            os.path.expanduser('~'),
+        )
+        if not fname:
+            return
+        # remove all ignored labels
+        for i, action in index_to_action.items():
+            if action == 'ignore':
+                image_watershed[image_watershed == i] = 0
+
+        # compute region properties
+        props = regionprops_table(
+            image_watershed,
+            intensity_image=image,
+            properties=('label', 'area', 'centroid', 'eccentricity', 'mean_intensity')
+        )
+
+        df = pd.DataFrame(props)
+        scale = float(self.doublespinbox_pixeltoum.value())
+        df['area'] *= scale**2
+
+        df_summary = df.describe()
+        # save to excel files
+        df.to_excel(fname + '.xlsx')
+        df_summary.to_excel(fname + '_summary.xlsx')
+
     #############
     # INTERNALS #
     #############
@@ -162,7 +224,7 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
         try:
             image_th = self.data['image_th']
             image_markers = self.data['image_markers']
-            image_watershed = self.data['watershed']
+            image_watershed = self.data['image_watershed']
         except KeyError:
             return
         # get index <-> action map
@@ -202,21 +264,25 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
         # todo: cursor should be set to busy
         try:
             image = self.data['image']
+            roi = self.data['roi']
+            image_markers = self.data['image_markers']
         except KeyError:
             return
 
-        th = self.slider_threshold.value()
+        th = float(self.box_threshold.value())
         # compute threshold overlay
-        image_th = _compute_threshold_image(image, th)
+        image_th = _compute_threshold_image(image, th, roi)
 
-        # compute labels from markers
-        image_markers = self.data['image_markers']
-        if image_markers.any():
-            # here the threshold I'm using (-1 on low values and 0 on high values) makes a mess on library functions
-            image_watershed = _compute_watershed(image_th, image_markers)
+        # reduce image size to ROI
+        image_cut = image[roi]
+        image_th_cut = image_th[roi]
+        image_markers_cut = image_markers[roi]
+
+        if image_markers_cut.any():
+            image_watershed_cut = _compute_watershed(image_th_cut, image_markers_cut)
         else:
             # no markers are present
-            image_watershed = np.zeros_like(image)
+            image_watershed_cut = np.zeros_like(image_cut)
 
         # compute overlay
         # todo: soft-code alpha
@@ -232,21 +298,34 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
                 colors.append(color)
         except KeyError:
             pass
-
+        # add the color for threshold areas
         # todo: soft-code threshold_color
-        colors.append((0, 0, 255))
+        colors.append((0, 0, 1.0))
 
-        tmp = np.zeros_like(image)
-        tmp[image_th == 0] = -1
+        tmp = np.zeros_like(image_cut)
+        tmp[image_th_cut == 0] = -1
 
         # todo: soft-code alpha, bg_label, bg_color
-        image_overlay = label2rgb(tmp + image_watershed, image, alpha=0.4, bg_label=0, bg_color=None, colors=colors)
+        image_overlay_cut = label2rgb(tmp + image_watershed_cut, image_cut, alpha=0.4, bg_label=0, bg_color=None, colors=colors)
+        # restore images to the proper size
+        image_watershed = np.zeros(shape=image.shape, dtype=image_watershed_cut.dtype)
+        image_watershed[roi] = image_watershed_cut
+
+        image_overlay = np.zeros(shape=(*image.shape, 3), dtype=image_overlay_cut.dtype)
+        for i in range(3):
+            image_overlay[:, :, i] = image
+        image_overlay[roi] = image_overlay_cut
+
+        # draw markers
         for cc in zip(*image_markers.nonzero()):
             # todo: soft-code size
             # todo: soft-code colour
             _draw_cross(image_overlay, cc, 20, (255, 0, 0))
-        # store to data container
-        self.data['watershed'] = image_watershed
+
+        _draw_roi(image_overlay, roi)
+
+        # save to data container
+        self.data['image_watershed'] = image_watershed
         self.data['image_th'] = image_th
         self.data['image_overlay'] = image_overlay
         # update image view
@@ -260,41 +339,32 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
         except KeyError:
             pass
 
-    def _write_report(self):
-        try:
-            image = self.data['image']
-            image_watershed = self.data['watershed']
-            index_to_action = self.data['id_act_map']
-        except KeyError:
+    def _update_roi(self, pos):
+        roi = self.data['roi']
+        if self.bttn_roi_topleft.isChecked():
+            self.data['roi'] = (
+                slice(pos[0], roi[0].stop),
+                slice(pos[1], roi[1].stop)
+            )
+            # update GUI
+            self.box_roi_00.setValue(pos[0])
+            self.box_roi_01.setValue(pos[1])
+            # uncheck button
+            self.bttn_roi_topleft.setChecked(False)
+        elif self.bttn_roi_bottomright.isChecked():
+            self.data['roi'] = (
+                slice(roi[0].start, pos[0]),
+                slice(roi[1].start, pos[1])
+            )
+            # update GUI
+            self.box_roi_10.setValue(pos[0])
+            self.box_roi_11.setValue(pos[1])
+            # uncheck button
+            self.bttn_roi_bottomright.setChecked(False)
+        else:
             return
-        # get where user wants to save files
-        fname, _ = QFileDialog.getSaveFileName(
-            self,
-            'Save Report',
-            os.path.realpath('.'),
-        )
-        if not fname:
-            return
-        # remove all ignored labels
-        for i, action in index_to_action.items():
-            if action == 'ignore':
-                image_watershed[image_watershed == i] = 0
+        self._update_images()
 
-        # compute region properties
-        props = regionprops_table(
-            image_watershed,
-            intensity_image=image,
-            properties=('label', 'area', 'centroid', 'eccentricity', 'mean_intensity')
-        )
-
-        df = pd.DataFrame(props)
-        scale = float(self.doublespinbox_pixeltoum.value())
-        df['area'] *= scale**2
-
-        df_summary = df.describe()
-        # save to excel files
-        df.to_excel(fname + '.xlsx')
-        df_summary.to_excel(fname + '_summary.xlsx')
 
     ########################
     # SETTINGS AND CLOSING #
@@ -324,19 +394,19 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
 ##############
 # ALGORITHMS #
 ##############
-def _compute_threshold_image(img, th):
+def _compute_threshold_image(img, th, roi):
     """
     Function returns the region where img < th (background region)
     :param img: array-like, shape (N, M)
     :param th: float, threshold value
     :return: array-like, region where img < th
     """
-    mask = np.zeros_like(img, dtype=np.uint8)
-    mask[img > th] = 255
+    mask = np.zeros_like(img, dtype=img.dtype)
+    mask[roi][img[roi] > th] = 255
     return mask
 
 
-def _compute_watershed(img_th, img_markers):
+def _compute_watershed(img_th: object, img_markers: object) -> object:
     """
     Computes the compact watershed of image, using img_th as a mask and img_markers as seed points
     :param img_th: array-like, binary image separating foreground (to be detected) and background
@@ -372,17 +442,23 @@ def _draw_cross(img, centre, size, colour=(1.0, 0, 0)):
     img[rr_h, cc_h, :] = np.array(colour)
 
 
-
-# rect = (
-#     roi[0],
-#     roi[2],
-#     roi[1]-roi[0],
-#     roi[3]-roi[2]
-# )
-# if self.analysis_roi is None:
-#     new_rect = QGraphicsRectItem(*rect)
-#     new_rect.setPen(self.roi_pen)
-#     self.image_display.view.addItem(new_rect)
-#     self.analysis_roi = new_rect
-# else:
-#     self.analysis_roi.setRect(*rect)
+def _draw_roi(img, roi, colour=(1.0, 0, 0)):
+    """
+    Draws a cross centered at 'centre' with size 'size' directly on image 'img'
+    :param img: array-like, image to modify
+    :param roi: tuple of slices
+    :param colour: tuple, rgb values
+    :return: None
+    """
+    assert img.ndim == 3
+    # compute extrema positions
+    edges = [
+        (roi[0].start, roi[1].start, roi[0].stop , roi[1].start),  # |
+        (roi[0].stop , roi[1].start, roi[0].stop , roi[1].stop ),  # _
+        (roi[0].stop , roi[1].stop , roi[0].start, roi[1].stop ),  # |
+        (roi[0].start, roi[1].stop , roi[0].start, roi[1].start),  # -
+    ]
+    print(edges)
+    for edge in edges:
+        rr, cc = line(*edge)
+        img[rr, cc, :] = np.array(colour)
