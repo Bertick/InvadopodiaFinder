@@ -20,8 +20,8 @@ from .Gui.mainwindow import Ui_MainWindow
 import logging
 
 VIEW_OPTIONS = {
-    'Input image': 'image',
     'Segmented image': 'image_overlay',
+    'Input image': 'image',
 }
 
 mACCEPT_COLORS = [
@@ -102,6 +102,9 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
             self.data['image'] = image
             self.data['image_overlay'] = np.zeros_like(image)
             self.data['image_markers'] = np.zeros_like(image)
+            self.data['watershed'] = np.zeros_like(image)
+            self.data['new_marker'] = ()
+            self.data['id_act_map'] = {}
             self._compute_threshold()
             self._update_imageview(autoLevels=True, autoRange=True)
 
@@ -265,13 +268,13 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
         except KeyError:
             return
         # get where user wants to save files
-        dirname = QFileDialog.getExistingDirectory(
+        fname, _ = QFileDialog.getSaveFileName(
             self,
-            'Open Directory',
+            'Save Report',
             os.path.realpath('.'),
-            options=QFileDialog.ShowDirsOnly
         )
-        # todo: do we need to sanity check 'dir'?
+        if not fname:
+            return
         # remove all ignored labels
         for i, action in index_to_action.items():
             if action == 'ignore':
@@ -286,14 +289,12 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
 
         df = pd.DataFrame(props)
         scale = float(self.doublespinbox_pixeltoum.value())
-        df['area'] *= scale
+        df['area'] *= scale**2
 
         df_summary = df.describe()
         # save to excel files
-        fname = os.path.join(dirname, 'summary.xlsx')
-        df_summary.to_excel(fname)
-        fname = os.path.join(dirname, 'data_list.xlsx')
-        df.to_excel(fname)
+        df.to_excel(fname + '.xlsx')
+        df_summary.to_excel(fname + '_summary.xlsx')
 
     ########################
     # SETTINGS AND CLOSING #

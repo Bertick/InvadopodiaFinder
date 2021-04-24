@@ -114,13 +114,6 @@
             </layout>
            </item>
            <item>
-            <widget class="QLabel" name="label_7">
-             <property name="text">
-              <string>Secondary view</string>
-             </property>
-            </widget>
-           </item>
-           <item>
             <widget class="QComboBox" name="combobox_viewoptions"/>
            </item>
           </layout>
@@ -176,7 +169,7 @@
         <item>
          <widget class="QGroupBox" name="box_do_filtersize">
           <property name="title">
-           <string>Filter by size</string>
+           <string>Filter by size (work-in-progress)</string>
           </property>
           <property name="checkable">
            <bool>true</bool>
