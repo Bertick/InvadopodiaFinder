@@ -1,6 +1,4 @@
-import sys
 import faulthandler
-from PyQt5.QtWidgets import QApplication
 
 from CellAnalysis.CellAnalysis import InvadopodiaGui
 
@@ -10,17 +8,19 @@ date_fmt = "%d/%m/%Y %H:%M:%S"
 logging.basicConfig(format=fmt, datefmt=date_fmt, filename='debug.log', level=logging.DEBUG)
 
 APP_NAME = "InvadopodiaGui"
-APP_VERSION = "0.2"
+APP_VERSION = "0.2.5"
 
 
 # todo: soft-code colors and parameters
-# todo: put some GodDamn logging info
+# todo: add type hints
+# todo: DocString on functions/methods
 
 # OPTIMIZATION
 # todo: lazy import (do I really?)
 
 # KNOWN BUGS
 # todo: if markers are present when ROI is moved and they fall outside ROI, software behaviour is undefined
+# todo: while _update_images() is running, moving the mouse wheel caused a marker to appear in the threshold area (???)
 
 if __name__ == '__main__':
     import sys
