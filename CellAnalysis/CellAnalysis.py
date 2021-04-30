@@ -24,6 +24,7 @@ VIEW_OPTIONS = {
     'Segmented image': 'image_overlay',
     'Input image': 'image',
 }
+# note: I'm pretty sure that if BACKGROUND_LABEL is different from 0, stuff will break
 BACKGROUND_LABEL = 0
 THRESHOLD_COLOR = (0.0, 0.0, 1.0)
 # marker colors
@@ -83,15 +84,15 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
         self.bttn_ignoremarker.toggled.connect(self._on_markerbuttons_click)
         # write report
         self.bttn_dosave.released.connect(self._write_report)
-        # ROI buttons toggle
-        self.bttn_roi_topleft.toggled.connect(self._on_roibuttons_click)
-        self.bttn_roi_bottomright.toggled.connect(self._on_roibuttons_click)
+        # ROI button toggle
+        self.bttn_toggle_roi.toggled.connect(self._toggle_roi)
         # logging
         logging.debug(f'Created InvadopodiaGui - {id(self)}')
 
     #############################
     # CALLBACKS FOR USER ACTION #
     #############################
+    @pyqtSlot(bool)
     def _on_load_image(self, checked):
         fname, _ = QFileDialog.getOpenFileName(
             None,
@@ -120,17 +121,7 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
             sys.exit(1)
         else:
             self.data['image'] = image
-            self.data['roi'] = (slice(0, image.shape[0]-1), slice(0, image.shape[1]-1))
-            # tmp_roi = ROI((0, 0), (image.shape[0]//2, image.shape[1]//2), movable=False, rotatable=False, resizable=False)
-            # # todo: add a button 'set ROI' and move the ROI creating to _add_roi() method
-            # ## handles scaling horizontally around center
-            # tmp_roi.addScaleHandle([0, 1], [0.5, 0.5])
-            # tmp_roi.addScaleHandle([1, 0], [0.5, 0.5])
-            # tmp_roi.addTranslateHandle([0.5, 0.5])
-            self.imageView.view.addItem(tmp_roi)
-            # set roi values to GUI
-            self.box_roi_10.setValue(image.shape[0])
-            self.box_roi_11.setValue(image.shape[1])
+            self.data['roi'] = None
             self.data['image_overlay'] = np.zeros_like(image)
             self.data['image_markers'] = np.zeros_like(image)
             self.data['image_watershed'] = np.zeros_like(image)
@@ -163,11 +154,6 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
         pos = self.imageView.view.mapSceneToView(event.scenePos())
         pos = (int(pos.x()), int(pos.y()))
         logging.debug(f'Mouse click at {pos}')
-        # first check if the user is trying to adjust the ROI
-        if self.bttn_roi_topleft.isChecked() or self.bttn_roi_bottomright.isChecked():
-            self._update_roi(pos)
-            event.accept()
-            return
 
         if self.bttn_addmarker.isChecked():
             action = mACTION_ADD
@@ -195,16 +181,6 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
         else:
             self.bttn_addmarker.setChecked(False)
             self.bttn_removemarker.setChecked(False)
-
-    @pyqtSlot(bool)
-    def _on_roibuttons_click(self, checked):
-        if not checked:
-            return
-        sender = self.sender()
-        if sender is self.bttn_roi_topleft:
-            self.bttn_roi_bottomright.setChecked(False)
-        else:
-            self.bttn_roi_topleft.setChecked(False)
 
     def _write_report(self):
         try:
@@ -287,16 +263,16 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
         logging.debug(f'Processing marker at {pos}, with action {action}')
         # operate based on action
         if action == mACTION_ADD or action == mACTION_IGNORE:
-            index = image_markers.max() + 1
-            image_markers[pos] = index
-            label_to_action[index] = action
+            label = image_markers.max() + 1
+            image_markers[pos] = label
+            label_to_action[label] = action
         elif action == mACTION_REMOVE:
-            index = image_watershed[pos]
-            if index != BACKGROUND_LABEL:
+            label = image_watershed[pos]
+            if label != BACKGROUND_LABEL:
                 # removes any marker present in the clicked region
-                image_markers[image_watershed == index] = BACKGROUND_LABEL
+                image_markers[image_watershed == label] = BACKGROUND_LABEL
 
-            label_to_action.pop(index, None)
+            label_to_action.pop(label, None)
         else:
             logging.error(f'Marker at {pos} has unknown action {action}. Raising RuntimeError')
             raise RuntimeError(f'Unknown marker action {action}')
@@ -307,26 +283,42 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
         with BusyCursor():
             try:
                 image = self.data['image']
-                roi = self.data['roi']
                 image_markers = self.data['image_markers']
             except KeyError:
+                # some data (like image) is not defined/loaded
                 return
+
+            try:
+                roi, _ = self.data['roi'].getArraySlice(image, self.imageView.imageItem)
+            except AttributeError:
+                # self.data['roi'] is None
+                roi = None
+
+            # first check if some markers are outside the ROI position and remove them
+            if roi:
+                mask = np.ones_like(image_markers)
+                mask[roi] = 0
+
+                for cc in zip(*image_markers.nonzero()):
+                    label = image_markers[cc]
+                    if mask[cc]:
+                        # marker is outside ROI
+                        image_markers[cc] = 0
+                        self.data['lb_act_map'].pop(label, None)
+
+                # reduce image size to ROI
+                image = image[roi]
+                image_markers = image_markers[roi]
 
             th = float(self.box_threshold.value())
             # compute threshold overlay
-            image_th = _compute_threshold_image(image, th, roi)
+            image_th = _compute_threshold_image(image, th)
 
-            # todo: extend to work in case ROI is None
-            # reduce image size to ROI
-            image_cut = image[roi]
-            image_th_cut = image_th[roi]
-            image_markers_cut = image_markers[roi]
-
-            if image_markers_cut.any():
-                image_watershed_cut = _compute_watershed(image_th_cut, image_markers_cut)
+            if image_markers.any():
+                image_watershed = _compute_watershed(image_th, image_markers)
             else:
                 # no markers are present
-                image_watershed_cut = np.zeros_like(image_cut)
+                image_watershed = np.zeros_like(image)
 
             # compute overlay
             # todo: soft-code alpha
@@ -344,26 +336,18 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
             # add the color for threshold areas
             colors.append(THRESHOLD_COLOR)
             # to color the threshold(ed) area (i.e. the background) a different color, we assign a dummy label (-1)
-            tmp = np.zeros_like(image_cut)
-            tmp[image_th_cut == BACKGROUND_LABEL] = -1
+            tmp = np.zeros_like(image)
+            tmp[image_th == BACKGROUND_LABEL] = -1
 
             # todo: soft-code alpha
-            image_overlay_cut = label2rgb(
-                tmp + image_watershed_cut,
-                image_cut,
+            image_overlay = label2rgb(
+                tmp + image_watershed,
+                image,
                 alpha=0.4,
                 bg_label=BACKGROUND_LABEL,
                 bg_color=None,
                 colors=colors
             )
-            # restore images to the proper size
-            image_watershed = np.zeros(shape=image.shape, dtype=image_watershed_cut.dtype)
-            image_watershed[roi] = image_watershed_cut
-
-            image_overlay = np.zeros(shape=(*image.shape, 3), dtype=image_overlay_cut.dtype)
-            for i in range(3):
-                image_overlay[:, :, i] = image / 255
-            image_overlay[roi] = image_overlay_cut
 
             # draw markers
             for cc in zip(*image_markers.nonzero()):
@@ -373,7 +357,19 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
                 # todo: soft-code size
                 _draw_cross(image_overlay, cc, 20, color)
 
-            _draw_roi(image_overlay, roi)#todo:remove
+            if roi:
+                # restore images to the proper size
+                tmp = np.zeros(shape=self.imageView.image.shape[0:2], dtype=image_watershed.dtype)
+                tmp[roi] = image_watershed
+                image_watershed = tmp
+
+                tmp = np.stack([self.data['image'] / 255 for _ in range(3)], axis=-1)
+                tmp[roi] = image_overlay
+                image_overlay = tmp
+
+                tmp = np.ones_like(self.data['image']) * BACKGROUND_LABEL
+                tmp[roi] = image_th
+                image_th = tmp
 
             # save to data container
             self.data['image_watershed'] = image_watershed
@@ -390,30 +386,32 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
         except KeyError:
             pass
 
-    def _update_roi(self, pos):#todo:remove
-        roi = self.data['roi']
-        if self.bttn_roi_topleft.isChecked():
-            self.data['roi'] = (
-                slice(pos[0], roi[0].stop),
-                slice(pos[1], roi[1].stop)
-            )
-            # update GUI
-            self.box_roi_00.setValue(pos[0])
-            self.box_roi_01.setValue(pos[1])
-            # uncheck button
-            self.bttn_roi_topleft.setChecked(False)
-        elif self.bttn_roi_bottomright.isChecked():
-            self.data['roi'] = (
-                slice(roi[0].start, pos[0]),
-                slice(roi[1].start, pos[1])
-            )
-            # update GUI
-            self.box_roi_10.setValue(pos[0])
-            self.box_roi_11.setValue(pos[1])
-            # uncheck button
-            self.bttn_roi_bottomright.setChecked(False)
+    @pyqtSlot(bool)
+    def _toggle_roi(self, checked):
+        if not checked:
+            try:
+                self.imageView.view.removeItem(self.data['roi'])
+                self.data['roi'].sigRegionChangeFinished.disconnect(self._update_images)
+                self.data['roi'] = None
+            except KeyError:
+                pass
         else:
-            return
+            try:
+                image = self.data['image']
+            except KeyError:
+                return
+
+            roi = ROI(
+                (0, 0),
+                (image.shape[0] // 2, image.shape[1] // 2),
+                movable=False, rotatable=False, resizable=False
+            )
+            roi.addScaleHandle([0, 1], [0.5, 0.5])
+            roi.addScaleHandle([1, 0], [0.5, 0.5])
+            roi.addTranslateHandle([0.5, 0.5])
+            roi.sigRegionChangeFinished.connect(self._update_images)
+            self.data['roi'] = roi
+            self.imageView.view.addItem(roi)
         self._update_images()
 
     ########################
@@ -444,7 +442,7 @@ class InvadopodiaGui(QMainWindow, Ui_MainWindow):
 ##############
 # ALGORITHMS #
 ##############
-def _compute_threshold_image(img, th, roi):
+def _compute_threshold_image(img, th):
     """
     Function returns the region where img < th (background region)
     :param img: array-like, shape (N, M)
@@ -452,7 +450,7 @@ def _compute_threshold_image(img, th, roi):
     :return: array-like, region where img < th
     """
     mask = np.zeros_like(img, dtype=img.dtype)
-    mask[roi][img[roi] > th] = 255
+    mask[img > th] = 255
     return mask
 
 
@@ -491,24 +489,3 @@ def _draw_cross(img, centre, size, colour=(1.0, 0, 0)):
     img[rr_v, cc_v, :] = np.array(colour)
     img[rr_h, cc_h, :] = np.array(colour)
 
-
-def _draw_roi(img, roi, colour=(1.0, 0, 0)):
-    """
-    Draws a cross centered at 'centre' with size 'size' directly on image 'img'
-    :param img: array-like, image to modify
-    :param roi: tuple of slices
-    :param colour: tuple, rgb values
-    :return: None
-    """
-    assert img.ndim == 3
-    # compute extrema positions
-    edges = [
-        (roi[0].start, roi[1].start, roi[0].stop , roi[1].start),  # |
-        (roi[0].stop , roi[1].start, roi[0].stop , roi[1].stop ),  # _
-        (roi[0].stop , roi[1].stop , roi[0].start, roi[1].stop ),  # |
-        (roi[0].start, roi[1].stop , roi[0].start, roi[1].start),  # -
-    ]
-    print(edges)
-    for edge in edges:
-        rr, cc = line(*edge)
-        img[rr, cc, :] = np.array(colour)
